@@ -1,0 +1,25 @@
+---
+Language:        Cpp
+BasedOnStyle:  Google
+IndentWidth:     4
+ColumnLimit:     120
+UseTab:          Never
+AccessModifierOffset: -4
+AlignConsecutiveAssignments: true
+AlignConsecutiveDeclarations: true
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+SpacesInParentheses: false
+SpacesInAngles: false
+PointerAlignment: Left
+DerivePointerAlignment: false
+NamespaceIndentation: None
+SortIncludes:    true
+IncludeCategories:
+  - Regex:      '^<.*'
+    Priority:   1
+  - Regex:      '^".*'
+    Priority:   2
+...

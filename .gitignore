@@ -1,0 +1,60 @@
+# Build directories
+build/
+build-*/
+out/
+cmake-build-*/
+.build/
+
+# CMake
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+CMakeUserPresets.json
+*.cmake
+Makefile
+
+# Compiled binaries / libraries
+*.exe
+*.out
+*.app
+*.o
+*.obj
+*.so
+*.so.*
+*.dylib
+*.dll
+*.a
+*.lib
+*.pch
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.idea/
+.vscode/
+.clangd/
+.cache/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+.project
+.settings/
+.classpath
+.cproject
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs / tmp
+*.log
+*.swp
+tmp/
+temp/
+
+# Tests
+tests/test_*
+!tests/test_*.cpp
