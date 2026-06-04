@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux Release (GCC)
+            os: ubuntu-latest
+            build_type: Release
+            cc: gcc
+            cxx: g++
+
+          - name: Linux Debug + ASan (GCC)
+            os: ubuntu-latest
+            build_type: Debug
+            cc: gcc
+            cxx: g++
+            asan: ON
+
+          - name: Linux Release (Clang)
+            os: ubuntu-latest
+            build_type: Release
+            cc: clang
+            cxx: clang++
+
+          - name: macOS Release
+            os: macos-latest
+            build_type: Release
+            cc: clang
+            cxx: clang++
+
+          - name: Windows Release (MSVC)
+            os: windows-latest
+            build_type: Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: >
+          cmake -B build -S .
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DXFER_BUILD_TESTS=ON
+          -DXFER_ENABLE_ASAN=${{ matrix.asan || 'OFF' }}
+          -DXFER_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
