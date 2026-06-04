@@ -1,6 +1,8 @@
-// ============================================================================
-//  wire protocol 序列化实现
-// ============================================================================
+// xfer - transfer/protocol: on-wire serialize / deserialize helpers.
+//
+// All multi-byte integers are emitted / consumed in little-endian byte order.
+// See protocol.h for the full wire layout.
+
 #include "transfer/protocol.h"
 
 #include <cstring>
@@ -15,8 +17,9 @@ namespace wire {
 
 namespace {
 
-// --- 小端字节序辅助 ---
-// 为了可移植性（避免编译器内置函数），我们显式按字节写入/读取。
+// ---- little-endian helpers ----
+// Portable byte-order helpers: no compiler builtins required.
+
 inline void EncodeU16LE(std::uint16_t v, char* out) {
   out[0] = static_cast<char>(v & 0xFF);
   out[1] = static_cast<char>((v >> 8) & 0xFF);
@@ -46,19 +49,17 @@ inline std::uint64_t DecodeU64LE(const char* p) {
 
 }  // namespace
 
-// -------------------------------------------------------------------------
-//  Session header：32 字节。最后 4 字节是前面 28 字节的 CRC-32。
-// -------------------------------------------------------------------------
+// ---- Session header: 32 bytes, last 4 bytes = CRC-32 of the first 28. ----
 bool WriteSessionHeader(net::Socket& sock, const SessionHeader& h,
                         std::error_code& ec) {
   char buf[32] = {0};
   EncodeU32LE(kProtoMagic, &buf[0]);
   EncodeU16LE(h.version, &buf[4]);
-  // buf[6..7] 保留
+  // buf[6..7]: reserved two bytes.
   EncodeU64LE(h.total_files, &buf[8]);
   EncodeU64LE(h.total_bytes, &buf[16]);
   EncodeU32LE(h.flags, &buf[24]);
-  // 尾部 4 字节 = 前 28 字节的 CRC-32。
+  // Trailer: CRC-32 computed over the first 28 bytes.
   std::uint32_t header_crc = common::Crc32::Compute(buf, 28);
   EncodeU32LE(header_crc, &buf[28]);
   return sock.SendAll(buf, sizeof(buf), ec);
@@ -69,12 +70,11 @@ bool ReadSessionHeader(net::Socket& sock, SessionHeader& h,
   char buf[32];
   if (!sock.RecvAll(buf, sizeof(buf), ec)) return false;
 
-  // 校验 magic —— 避免误连接到非 xfer 服务。
   if (DecodeU32LE(&buf[0]) != kProtoMagic) {
     ec = std::make_error_code(std::errc::invalid_argument);
     return false;
   }
-  // 校验前 28 字节的 CRC-32 与尾部匹配。
+  // Validate the self-CRC before trusting any field.
   std::uint32_t expected = DecodeU32LE(&buf[28]);
   std::uint32_t actual = common::Crc32::Compute(buf, 28);
   if (expected != actual) {
@@ -89,9 +89,7 @@ bool ReadSessionHeader(net::Socket& sock, SessionHeader& h,
   return true;
 }
 
-// -------------------------------------------------------------------------
-//  Ack：8 字节 (4 OKAY + 4 flags)
-// -------------------------------------------------------------------------
+// ---- Ack: 8 bytes (4 magic + 4 flags) ----
 bool WriteAck(net::Socket& sock, std::uint32_t receiver_flags,
               std::error_code& ec) {
   char buf[8];
@@ -112,9 +110,15 @@ bool ReadAck(net::Socket& sock, std::uint32_t& receiver_flags,
   return true;
 }
 
-// -------------------------------------------------------------------------
-//  File Header：[4 FILE][2 path_len][8 size][4 payload_crc][path_len bytes]
-// -------------------------------------------------------------------------
+// ---- File record header: 18 bytes (4 magic + 2 path_len + 8 size + 4 crc) ----
+// followed immediately by `path_len` bytes of UTF-8 path. Payload bytes are
+// NOT sent here; callers push them separately to enable kernel zero-copy.
+//
+// On-wire layout (fixed 18 bytes):
+//   offset 0..3 : "FILE" magic
+//   offset 4..5 : path_len (LE u16)
+//   offset 6..13: file_size (LE u64)
+//   offset 14..17: payload_crc32 (LE u32)
 bool WriteFileHeader(net::Socket& sock, const FileEntry& entry,
                      std::error_code& ec) {
   if (entry.rel_path.size() > 0xFFFF) {
@@ -122,13 +126,11 @@ bool WriteFileHeader(net::Socket& sock, const FileEntry& entry,
     return false;
   }
   auto path_len = static_cast<std::uint16_t>(entry.rel_path.size());
-  char fixed[4 + 2 + 8 + 4];
+  char fixed[18];
   EncodeU32LE(kFileMagic, &fixed[0]);
   EncodeU16LE(path_len, &fixed[4]);
   EncodeU64LE(entry.size, &fixed[6]);
-  // fixed[14..17] 保留（flags）；先写 0。
-  EncodeU32LE(0, &fixed[14]);
-  EncodeU32LE(entry.crc32, &fixed[18]);
+  EncodeU32LE(entry.crc32, &fixed[14]);
   if (!sock.SendAll(fixed, sizeof(fixed), ec)) return false;
   if (path_len > 0 &&
       !sock.SendAll(entry.rel_path.data(), path_len, ec)) return false;
@@ -137,7 +139,7 @@ bool WriteFileHeader(net::Socket& sock, const FileEntry& entry,
 
 bool ReadFileHeader(net::Socket& sock, FileEntry& entry,
                     std::error_code& ec) {
-  char fixed[4 + 2 + 8 + 4];
+  char fixed[18];
   if (!sock.RecvAll(fixed, sizeof(fixed), ec)) return false;
   if (DecodeU32LE(&fixed[0]) != kFileMagic) {
     ec = std::make_error_code(std::errc::invalid_argument);
@@ -145,11 +147,11 @@ bool ReadFileHeader(net::Socket& sock, FileEntry& entry,
   }
   auto path_len = DecodeU16LE(&fixed[4]);
   entry.size = DecodeU64LE(&fixed[6]);
-  // fixed[14..17]：flags 保留
-  entry.crc32 = DecodeU32LE(&fixed[18]);
+  entry.crc32 = DecodeU32LE(&fixed[14]);
 
   if (path_len > 0) {
-    // path 放在 vector 里再 move 给 string；避免直接 resize 产生的零初始化。
+    // Buffer the variable-length path separately to avoid allocating a
+    // std::string of untrusted length directly.
     std::vector<char> tmp(path_len);
     if (!sock.RecvAll(tmp.data(), path_len, ec)) return false;
     entry.rel_path.assign(tmp.data(), tmp.size());
@@ -159,9 +161,7 @@ bool ReadFileHeader(net::Socket& sock, FileEntry& entry,
   return true;
 }
 
-// -------------------------------------------------------------------------
-//  Done：4 字节 magic
-// -------------------------------------------------------------------------
+// ---- Done: 4-byte magic sentinel ----
 bool WriteDone(net::Socket& sock, std::error_code& ec) {
   char buf[4];
   EncodeU32LE(kDoneMagic, buf);

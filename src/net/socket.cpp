@@ -1,6 +1,5 @@
-// ============================================================================
-//  Socket 实现
-// ============================================================================
+// xfer - net/socket: implementation of the RAII TCP socket wrapper.
+
 #include "net/socket.h"
 
 #include <cerrno>
@@ -33,8 +32,8 @@ namespace net {
 namespace {
 
 #if defined(_WIN32)
-// WinSock 的一次性初始化；放在带静态存储期的对象里，
-// 进程退出时由析构函数自动 WSACleanup。
+// One-time WinSock initialization (per-process); cleaned up automatically
+// when the static WSAInit instance is destroyed.
 struct WSAInit {
   WSAInit() {
     WSADATA wsa{};
@@ -45,7 +44,7 @@ struct WSAInit {
 static WSAInit g_wsa_init;
 #endif
 
-// 把 errno / WSAGetLastError 包装成 std::error_code 的小工具。
+// Wrap the platform's last-error value into a std::error_code.
 std::error_code LastError() {
 #if defined(_WIN32)
   return {WSAGetLastError(), std::system_category()};
@@ -56,16 +55,14 @@ std::error_code LastError() {
 
 }  // namespace
 
-// ============================================================================
-//  生命周期
-// ============================================================================
+// ---- lifetime ----
 Socket::Socket() noexcept : fd_(-1) {}
 Socket::Socket(socket_t fd) noexcept : fd_(fd) {}
 
 Socket::~Socket() { Close(); }
 
 Socket::Socket(Socket&& other) noexcept : fd_(other.fd_) {
-  other.fd_ = -1;  // 夺取所有权后把源对象置为无效状态
+  other.fd_ = -1;
 }
 
 Socket& Socket::operator=(Socket&& other) noexcept {
@@ -88,16 +85,15 @@ void Socket::Close() noexcept {
   }
 }
 
-// ============================================================================
-//  Connect：先调用 getaddrinfo 做 DNS/AI 解析，再遍历所有结果
-//  尝试连接。第一个成功的结果即被采用。
-// ============================================================================
+// ---- connect ----
+// Resolve `host` (domain/IPv4/IPv6) via getaddrinfo and try each result in turn
+// until one connects successfully.
 bool Socket::Connect(const std::string& host, int port, std::error_code& ec) {
   Close();
 
   struct addrinfo hints {};
-  hints.ai_family = AF_UNSPEC;      // 同时接受 IPv4 和 IPv6
-  hints.ai_socktype = SOCK_STREAM;   // TCP
+  hints.ai_family = AF_UNSPEC;      // IPv4 and IPv6 both allowed
+  hints.ai_socktype = SOCK_STREAM;
 
   struct addrinfo* info = nullptr;
   int rc = ::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints,
@@ -107,14 +103,12 @@ bool Socket::Connect(const std::string& host, int port, std::error_code& ec) {
     return false;
   }
 
-  // 遍历所有地址；一旦成功立即跳出。
   for (auto p = info; p != nullptr; p = p->ai_next) {
     fd_ = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
     if (fd_ < 0) continue;
     if (::connect(fd_, p->ai_addr, static_cast<socklen_t>(p->ai_addrlen)) == 0) {
       break;
     }
-    // 当前地址失败，尝试下一个。
     Close();
   }
   freeaddrinfo(info);
@@ -126,16 +120,17 @@ bool Socket::Connect(const std::string& host, int port, std::error_code& ec) {
   return true;
 }
 
-// ============================================================================
-//  Bind / Listen / Accept
-// ============================================================================
+// ---- bind / listen / accept ----
+// Bind to an IPv6 dual-stack wildcard so the same port accepts both v4 and v6
+// clients where supported. SO_REUSEADDR is set to simplify restarts during
+// development (TIME_WAIT recovery).
 bool Socket::Bind(int port, std::error_code& ec) {
   Close();
 
   struct sockaddr_in6 addr {};
   addr.sin6_family = AF_INET6;
   addr.sin6_port = htons(static_cast<std::uint16_t>(port));
-  addr.sin6_addr = in6addr_any;  // 监听所有接口
+  addr.sin6_addr = in6addr_any;
 
   fd_ = ::socket(AF_INET6, SOCK_STREAM, 0);
   if (fd_ < 0) {
@@ -143,14 +138,13 @@ bool Socket::Bind(int port, std::error_code& ec) {
     return false;
   }
 
-  // 允许在 TIME_WAIT 状态下立刻重启监听；便于调试。
   int on = 1;
   ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR,
                reinterpret_cast<const char*>(&on), sizeof(on));
 
-  // 关闭 IPv6-only 监听，使同一 socket 接受 v4 映射地址；
-  // 不是所有平台都支持，但失败了也没关系（只是无法接受 v4 连接）。
 #if defined(IPV6_V6ONLY)
+  // Allow v4-mapped connections on the same socket. Not available on all
+  // platforms; ignore errors — callers can still connect via IPv6.
   int v6only = 0;
   ::setsockopt(fd_, IPPROTO_IPV6, IPV6_V6ONLY,
                reinterpret_cast<const char*>(&v6only), sizeof(v6only));
@@ -197,9 +191,7 @@ bool Socket::SetNoDelay(bool on, std::error_code& ec) {
   return true;
 }
 
-// ============================================================================
-//  Send / Recv：单次调用。
-// ============================================================================
+// ---- send / recv (single call) ----
 int Socket::Send(const void* data, std::size_t len, std::error_code& ec) {
   auto n = ::send(fd_, static_cast<const char*>(data), len, 0);
   if (n < 0) {
@@ -218,6 +210,7 @@ int Socket::Recv(void* data, std::size_t len, std::error_code& ec) {
   return static_cast<int>(n);
 }
 
+// ---- send / recv (full transfer) ----
 bool Socket::SendAll(const void* data, std::size_t len, std::error_code& ec) {
   auto p = static_cast<const char*>(data);
   while (len > 0) {
@@ -233,7 +226,8 @@ bool Socket::RecvAll(void* data, std::size_t len, std::error_code& ec) {
   auto p = static_cast<char*>(data);
   while (len > 0) {
     int n = Recv(p, len, ec);
-    // n == 0 代表对端关闭，意味着我们要的字节不能被完整读到。
+    // n == 0 means the peer closed early; the caller cannot get the full
+    // amount of data it requested.
     if (n <= 0) {
       if (n == 0) ec = std::make_error_code(std::errc::connection_reset);
       return false;
@@ -244,10 +238,11 @@ bool Socket::RecvAll(void* data, std::size_t len, std::error_code& ec) {
   return true;
 }
 
-// ============================================================================
-//  SendFromFd：优先使用操作系统提供的零拷贝机制；不可用时回退到
-//  4 MiB 循环的 pread + send 路径。
-// ============================================================================
+// ---- zero-copy send ----
+// Send `length` bytes from `source_fd` to this socket. Tries the native
+// zero-copy primitive first, and falls back to a userspace 4 MiB pread+send
+// loop on platforms without one. `offset_in_out` tracks cumulative bytes
+// pushed, so callers can determine how much was sent on partial failure.
 bool Socket::SendFromFd(int source_fd, std::uint64_t& offset_in_out,
                         std::uint64_t length, std::error_code& ec) {
   if (!Valid()) {
@@ -259,8 +254,7 @@ bool Socket::SendFromFd(int source_fd, std::uint64_t& offset_in_out,
   std::uint64_t remaining = length;
 
 #if defined(__linux__)
-  // Linux sendfile(2)：in_fd 必须是支持 mmap 的文件（普通文件 OK），
-  // out_fd 必须是一个 socket。`offset` 是 in/out 参数，会被内核更新。
+  // Linux sendfile(2): efficient kernel copy between file and socket.
   off64_t off = static_cast<off64_t>(offset_in_out);
   while (remaining > 0) {
     std::size_t want = remaining > static_cast<std::uint64_t>(1ULL << 30)
@@ -284,8 +278,8 @@ bool Socket::SendFromFd(int source_fd, std::uint64_t& offset_in_out,
   return true;
 
 #elif defined(__APPLE__)
-  // macOS sendfile(2)：int sendfile(int fd, int s, off_t offset, off_t *len, ...)
-  // 注意参数顺序与 Linux 不同 —— 文件描述符在前，socket 在后。
+  // macOS sendfile(2): `sendfile(fd, s, offset, &len)` — note the
+  // file/socket argument order is swapped vs. Linux.
   off_t off = static_cast<off_t>(offset_in_out);
   while (remaining > 0) {
     off_t len = remaining > static_cast<std::uint64_t>(1LL << 30)
@@ -309,7 +303,8 @@ bool Socket::SendFromFd(int source_fd, std::uint64_t& offset_in_out,
   return true;
 
 #else
-  // 通用回退：循环地从 source_fd pread 到用户缓冲区，再 send 出去。
+  // Portable userspace fallback. Uses a thread-local buffer to avoid repeated
+  // allocations on the hot path.
   static constexpr std::size_t kBufSize = 4 * 1024 * 1024;
   thread_local std::vector<char> g_buffer(kBufSize);
   while (remaining > 0) {

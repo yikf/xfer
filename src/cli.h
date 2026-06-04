@@ -1,19 +1,20 @@
-// xfer - CLI 模块：命令行参数解析与子命令分发
+// xfer - cli: command-line argument parsing and subcommand dispatch.
 //
-// 命令行语法：
-//   xfer send  [--host HOST] [-p PORT] [-r] [-L] [--no-zero-copy] <file-or-dir>...
-//   xfer recv  [-p PORT] [-o DIR] [--no-verify]
-//   xfer --help / -h    : 打印帮助
-//   xfer --version / -V : 打印版本
+// Command grammar:
+//   xfer send  [--host HOST] [-p PORT] [-r] [-L] [--no-zero-copy] [--no-progress]
+//              <file-or-dir>...
+//   xfer recv  [-p PORT] [-o DIR] [--no-verify] [--no-progress]
+//   xfer --help / -h
+//   xfer --version / -V
 //
-// 常见选项：
-//   -v, --verbose  : 开启 DEBUG 日志
-//   --no-progress  : 关闭进度条
-//   --color=MODE   : always|auto|never 控制日志颜色
+// Global options:
+//   -v, --verbose     Enable DEBUG logging
+//   --no-progress     Disable inline progress bar
+//   --color=MODE      always|auto|never — controls log colorization
 //
-// 设计：Parse 将 argc/argv 解析为 Options 结构，
-// 然后由调用方（main.cpp）根据 opts.mode 调用 RunSend 或 RunReceive。
-// 这种"解析/运行"分离便于单元测试。
+// Design: Parse populates `Options`; the caller dispatches on `opts.mode`.
+// This separation simplifies unit-testing the parser independently from the
+// network transport.
 
 #ifndef XFER_CLI_H
 #define XFER_CLI_H
@@ -25,50 +26,46 @@
 namespace xfer {
 namespace cli {
 
-// 子命令类型。
-// 由 Parse 根据第一个非选项参数设置。
 enum class Mode {
-    Unset,      // 未指定 / 参数缺失
-    Send,       // 发送端：推送文件到远端
-    Receive,    // 接收端：从 sender 拉取或监听等待
-    Help,       // --help
-    Version,    // --version
+  Unset,
+  Send,
+  Receive,
+  Help,
+  Version,
 };
 
-// 完整的命令行选项集合。
+// Full set of parsed command-line options.
 struct Options {
-    Mode mode = Mode::Unset;
+  Mode mode = Mode::Unset;
 
-    // Common
-    bool verbose = false;       // 是否开启 DEBUG 日志
-    bool no_progress = false;   // 关闭进度条
-    bool force_color = false;   // --color=always
-    int port = 9876;            // TCP 端口
+  // Common options
+  bool verbose = false;
+  bool no_progress = false;
+  bool force_color = false;
+  int port = 9876;
 
-    // Send-side
-    std::string host;           // 远端 host；空字符串表示 sender 监听等待
-    bool listen = false;        // sender 在端口上监听，等待 receiver 主动连接
-    bool recursive = false;     // -r / --recursive 递归进入目录
-    bool follow_symlinks = false;  // -L：遍历目录时跟随符号链接
-    bool no_zero_copy = false;  // 禁用 sendfile()，强制用户态路径（用于性能对比/调试）
-    std::vector<std::string> paths;  // send 模式下：要发送的文件或目录列表
+  // Sender options
+  std::string host;            // Remote host; empty => sender listens for connections
+  bool listen = false;         // Listen on `port` and wait for receiver to connect
+  bool recursive = false;      // Descend into directories
+  bool follow_symlinks = false;// Follow symlinks during directory walk
+  bool no_zero_copy = false;   // Disable sendfile()-style zero-copy paths
+  std::vector<std::string> paths;
 
-    // Receive-side
-    std::string output_dir;     // -o / --output：输出目录
-    bool no_verify = false;     // 关闭 CRC-32 校验
+  // Receiver options
+  std::string output_dir;      // Output directory; empty = current working directory
+  bool no_verify = false;      // Disable per-file CRC-32 verification
 };
 
-// 解析 argc/argv。成功返回 true；失败打印错误到 stderr 并返回 false。
-// Parse argc/argv into `opts`.  Returns true on success. On failure, prints
-// an error message to stderr and returns false.
+// Parse argc/argv into `opts`. On success returns true; on error writes a
+// one-line diagnostic to stderr and returns false.
 bool Parse(int argc, char** argv, Options& opts);
 
-// 将帮助文本打印到 stdout。
-// Print usage/help text to stdout.
+// Print the canonical help text to stdout.
 void PrintHelp();
 
-// 执行发送/接收主循环。成功返回 0，失败返回非零（供 main() 用作 exit code）。
-// Entry points
+// Entry points: run a send or receive session end-to-end. Returns the process
+// exit code (0 = success, >0 = failure).
 int RunSend(const Options& opts);
 int RunReceive(const Options& opts);
 
